@@ -199,7 +199,7 @@ leaf::result<void> process_file( FILE * f )
 }
 ----
 
-Above, `read_line` presumably could fail with an `io_error` or with a `parse_error`, but `process_file` does not handle errors so it remains neutral to failures, except to attach the current `line_number` if something goes wrong. Calling `on_error` holds a copy of the current `line_number` wrapped in `struct e_line`. If `read_parse` succeeds, the `e_line` object is simply discarded; but if it fails, the `e_line` object will be automatically attached to the failure.
+Above, `read_line` presumably could fail with an `io_error` or with a `parse_error`, but `process_file` does not handle errors so it remains neutral to failures, except to attach the current `line_number` if something goes wrong. Calling `on_error` holds a copy of the current `line_number` wrapped in `struct e_line`. If `parse_line` succeeds, the `e_line` object is simply discarded; but if it fails, the `e_line` object will be automatically attached to the failure.
 
 Such failures can then be handled like so:
 
