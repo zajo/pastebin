@@ -1,0 +1,226 @@
+== Introduction
+
+What is a failure? It is simply the inability of a function to return a valid result, instead producing an error object describing the reason for the failure.
+
+A typical design is to return a variant type, e.g. `result<T, E>`. Internally, such variant type must store a discriminant (in this case a boolean) to indicate whether it holds a `T` or an `E`.
+
+The design of LEAF is informed by the observation that the immediate caller must have access to the discriminant in order to determine the availability of a valid `T`, but otherwise it rarely needs to access the `E`. The error object is only needed once an error handling scope is reached.
+
+Therefore what would have been a `result<T, E>` becomes `result<T>`, which stores the discriminant and (optionally) a `T`, while the `E` is communicated directly to the error handling scope where it is needed.
+
+The benefit of this decomposition is that `result<T>` becomes extremely lightweight, as it is not coupled with error types; further, error objects are communicated in O(1) time (independent of the call stack depth).
+
+A function that communicates an error is pretty straight-forward:
+
+[source,c++]
+----
+enum class err1 { e1, e2, e3 };
+
+leaf::result<T> f()
+{
+  if( error_detected )
+    return leaf::new_error( err1::e1 ); // Pass an error object of any type
+
+  // Produce and return a T.
+}
+----
+
+Checking for errors communicated by a `leaf::result<T>` works as expected:
+
+[source,c++]
+----
+{
+  leaf::result<T> r = f();
+  if( !r )
+    return r.error();
+
+  auto v = r.value();
+  // Use v
+}
+----
+
+The boilerplate `if` statement can be avoided using `BOOST_LEAF_AUTO`:
+
+[source,c++]
+----
+{
+  BOOST_LEAF_AUTO(v, f()); // Bail out on error
+
+  // Use v
+}
+----
+
+Error handling scopes must use a special syntax to indicate that they handle errors, and therefore need to access error objects. The following excerpt attempts several operations and handles errors of type `err1`:
+
+[source,c++]
+----
+{
+  auto r = leaf::try_handle_some(
+
+    []() -> leaf::result<U>
+    {
+      BOOST_LEAF_AUTO(v1, f1());
+      BOOST_LEAF_AUTO(v2, f2());
+
+      return g(v1. v2);
+    },
+
+    []( err1 e )
+    {
+      if( e == err1::e1 )
+        .... // Handle err1::e1
+      else
+        .... // Handle any other err1 value
+    } );
+}
+----
+
+The first lambda passed to `try_handle_some` is executed first; it attempts to produce a `result<U>`, but it may fail.
+
+The second lambda is an error handler: it will be called iff the first lambda fails and an error object of type `err1` was communicated to LEAF. That object is stored on the stack, local to the `try_handle_some` function (LEAF knows to allocate this storage because we gave it an error handler that takes an `err1`).
+
+It is possible for an error handler to specify that it can only deal with a particular value of a given error type:
+
+[source,c++]
+----
+{
+  auto r = leaf::try_handle_some(
+
+    []() -> leaf::result<U>
+    {
+      BOOST_LEAF_AUTO(v1, f1());
+      BOOST_LEAF_AUTO(v2, f2());
+
+      return g(v1. v2);
+    },
+
+    []( leaf::match<err1, err1::e1> )
+    {
+      // Handle err::e1
+    },
+
+    []( err1 e )
+    {
+      // Handle any other err1 value
+    } );
+}
+----
+
+LEAF considers error handlers in order, and calls the first one for which it can supply arguments, based on the error objects currently being communicated. Above:
+
+* The first error handler uses the predicate `leaf::match` to specify that it should only be considered if an error object of type `err1` is available, and its value is `err1::e1`.
+
+* Otherwise the second error handler will be called if an error object of type `err1` is available, regardless of its value.
+
+It is of course possible to handle more than one error type:
+
+[source,c++]
+----
+auto r = leaf::try_handle_some(
+
+  []() -> leaf::result<U>
+  {
+    BOOST_LEAF_AUTO(v1, f1());
+    BOOST_LEAF_AUTO(v2, f2());
+
+    return g(v1, v2);
+  },
+
+  []( err1 e )
+  {
+    // Handle errors of type `err1`.
+  },
+
+  []( err2 e )
+  {
+    // Handle errors of type `err2`.
+  } );
+----
+
+In this case, because we have supplied two error handlers, `try_handle_some` knows to allocate storage on the stack for error objects of type `err1` and `err2`.
+
+It is also possible to write a single handler that requires more than one error object to handle failures:
+
+[source,c++]
+----
+auto r = leaf::try_handle_some(
+
+  []() -> leaf::result<U>
+  {
+    BOOST_LEAF_AUTO(v1, f1());
+    BOOST_LEAF_AUTO(v2, f2());
+
+    return g(v1, v2);
+  },
+
+  []( err1 e1, err2 e2 )
+  {
+    // Handle failures which communicate both an err1 and an err2 object.
+  } );
+----
+
+Naturally, `leaf::new_error` can be invoked with multiple error objects:
+
+[source,c++]
+----
+enum class err1 { e1, e2, e3 };
+enum class err2 { e1, e2 };
+
+leaf::result<T> f()
+{
+  if( error_detected )
+    return leaf::new_error(err1::e1, err2::e2);
+
+  // Produce and return a T.
+}
+----
+
+Alternatively, `leaf::on_error` can be used to associate additional error objects with failures that are "in flight":
+
+[source,c++]
+----
+enum class io_error { open_error, read_error, write_error };
+enum class parse_error { bad_syntax, bad_range };
+
+leaf::result<int> parse_line( FILE * f );
+
+struct e_line { int value; };
+
+leaf::result<void> process_file( FILE * f )
+{
+  for( int line_number = 1; line_number != 10; ++line_number )
+  {
+    auto load = leaf::on_error( e_line{ line_number } );
+
+    BOOST_LEAF_AUTO(v, parse_line(f));
+
+    // use v
+  }
+}
+----
+
+Above, `read_line` presumably could fail with an `io_error` or with a `parse_error`, but `process_file` does not handle errors so it remains neutral to failures, except to attach the current `line_number` if something goes wrong. Calling `on_error` holds a copy of the current `line_number` wrapped in `struct e_line`. If `read_parse` succeeds, the `e_line` object is simply discarded; but if it fails, the `e_line` object will be automatically attached to the failure.
+
+Such failures can then be handled like so:
+
+[source,c++]
+----
+auto r = leaf::try_handle_some(
+
+  []() -> leaf::result<void>
+  {
+    BOOST_LEAF_CHECK( process_file(f) );
+  },
+
+  []( io_error e, e_line l )
+  {
+    std::cerr << "I/O error at line " << l.value << std::endl;
+  },
+
+  []( parse_error e, e_line l )
+  {
+    std::cerr << "Parse error at line " << l.value << std::endl;
+  } );
+----
+
+What if neither error handler can be used? This could happen if we get an error other than `io_error` and `parse_error`, or if for some reason `e_line` wasn't attached to the failure. In this case, the failure will be communicated out of `try_handle_some` as a `result<void>`; presumably there is a more general error handling scope in the call stack.
